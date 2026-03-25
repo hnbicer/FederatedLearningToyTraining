@@ -1,5 +1,6 @@
 from pathlib import Path
 import random
+import copy
 
 import numpy as np
 import torch
@@ -18,10 +19,11 @@ OUT_DIR = Path(__file__).resolve().parent
 
 BATCH_SIZE = 128
 NUM_EPOCHS = 10
-LEARNING_RATE = 1e-3
-NUM_CLASSES = 10
-LATENT_DIMS = [2, 4, 8, 16, 32, 64]
-SEED = 0
+LEARNING_RATE = 5e-4
+NUM_CLASSES = 20
+LATENT_DIMS = [1, 2, 4, 8, 16, 32, 64, 128]
+#LATENT_DIMS = [1, 2,  32, 128]
+SEED = 1
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -79,6 +81,10 @@ def train_one_model(latent_dim, train_loader, test_loader, device):
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
+    best_test_acc = -1.0
+    best_epoch = -1
+    best_state_dict = None
+
     for epoch in range(1, NUM_EPOCHS + 1):
         model.train()
 
@@ -106,18 +112,33 @@ def train_one_model(latent_dim, train_loader, test_loader, device):
         epoch_train_loss = running_loss / total_train_samples
         _, epoch_test_acc = evaluate(model, test_loader, criterion, device)
 
+        if epoch_test_acc > best_test_acc:
+            best_test_acc = epoch_test_acc
+            best_epoch = epoch
+            best_state_dict = copy.deepcopy(model.state_dict())
+
         print(
-            f"[latent_dim={latent_dim:>2}] "
+            f"[latent_dim={latent_dim:>3}] "
             f"Epoch {epoch:02d}/{NUM_EPOCHS} | "
             f"Train Loss: {epoch_train_loss:.4f} | "
-            f"Test Acc: {100.0 * epoch_test_acc:.2f}%"
+            f"Test Acc: {100.0 * epoch_test_acc:.2f}% | "
+            f"Best Test Acc: {100.0 * best_test_acc:.2f}% (epoch {best_epoch})"
         )
 
-    # Final full evaluation
+    # Final full evaluation using final epoch weights
     train_loss, train_acc = evaluate(model, train_loader, criterion, device)
     test_loss, test_acc = evaluate(model, test_loader, criterion, device)
 
-    return model, train_loss, train_acc, test_loss, test_acc
+    return (
+        model,
+        best_state_dict,
+        best_epoch,
+        train_loss,
+        train_acc,
+        test_loss,
+        test_acc,
+        best_test_acc,
+    )
 
 
 # ============================================================
@@ -159,28 +180,52 @@ def main():
         print(f"Training model with latent_dim = {latent_dim}")
         print("=" * 70)
 
-        model, train_loss, train_acc, test_loss, test_acc = train_one_model(
+        (
+            model,
+            best_state_dict,
+            best_epoch,
+            train_loss,
+            train_acc,
+            test_loss,
+            test_acc,
+            best_test_acc,
+        ) = train_one_model(
             latent_dim=latent_dim,
             train_loader=train_loader,
             test_loader=test_loader,
             device=DEVICE,
         )
 
-        # Save model for this latent size
-        model_path = OUT_DIR / f"quadrant_vfl_mnist_latent{latent_dim}.pt"
-        torch.save(model.state_dict(), model_path)
+        # Save final model for this latent size
+        final_model_path = OUT_DIR / f"quadrant_vfl_mnist_latent{latent_dim}_final.pt"
+        torch.save(model.state_dict(), final_model_path)
+
+        # Save best model for this latent size
+        best_model_path = OUT_DIR / f"quadrant_vfl_mnist_latent{latent_dim}_best.pt"
+        torch.save(best_state_dict, best_model_path)
 
         print(
-            f"Final Results | latent_dim={latent_dim:>2} | "
+            f"Final Results | latent_dim={latent_dim:>3} | "
             f"Train Acc: {100.0 * train_acc:.2f}% | "
-            f"Test Acc: {100.0 * test_acc:.2f}%"
+            f"Final Test Acc: {100.0 * test_acc:.2f}% | "
+            f"Best Test Acc: {100.0 * best_test_acc:.2f}% (epoch {best_epoch})"
         )
 
-        # Requested compact array
-        rows_acc.append([latent_dim, train_acc, test_acc])
+        # Compact array
+        # [latent_dim, train_acc, final_test_acc, best_test_acc]
+        rows_acc.append([latent_dim, train_acc, test_acc, best_test_acc])
 
-        # More detailed array
-        rows_full.append([latent_dim, train_loss, train_acc, test_loss, test_acc])
+        # Detailed array
+        # [latent_dim, train_loss, train_acc, test_loss, final_test_acc, best_test_acc, best_epoch]
+        rows_full.append([
+            latent_dim,
+            train_loss,
+            train_acc,
+            test_loss,
+            test_acc,
+            best_test_acc,
+            best_epoch,
+        ])
 
     results_acc = np.array(rows_acc, dtype=np.float32)
     results_full = np.array(rows_full, dtype=np.float32)
@@ -200,7 +245,7 @@ def main():
         acc_csv_path,
         results_acc,
         delimiter=",",
-        header="latent_dim,train_acc,test_acc",
+        header="latent_dim,train_acc,final_test_acc,best_test_acc",
         comments="",
     )
 
@@ -208,15 +253,15 @@ def main():
         full_csv_path,
         results_full,
         delimiter=",",
-        header="latent_dim,train_loss,train_acc,test_loss,test_acc",
+        header="latent_dim,train_loss,train_acc,test_loss,final_test_acc,best_test_acc,best_epoch",
         comments="",
     )
 
     print("\n" + "=" * 70)
-    print("Compact results array: [latent_dim, train_acc, test_acc]")
+    print("Compact results array: [latent_dim, train_acc, final_test_acc, best_test_acc]")
     print(results_acc)
 
-    print("\nDetailed results array: [latent_dim, train_loss, train_acc, test_loss, test_acc]")
+    print("\nDetailed results array: [latent_dim, train_loss, train_acc, test_loss, final_test_acc, best_test_acc, best_epoch]")
     print(results_full)
 
     print(f"\nSaved:")
@@ -224,6 +269,7 @@ def main():
     print(f"  {full_npy_path}")
     print(f"  {acc_csv_path}")
     print(f"  {full_csv_path}")
+    print("  plus *_final.pt and *_best.pt model files for each latent size")
 
 
 if __name__ == "__main__":
